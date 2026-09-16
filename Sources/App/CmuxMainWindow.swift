@@ -311,6 +311,26 @@ final class CmuxMainWindow: NSWindow {
         }
     }
 
+    /// The window is immovable, so AppKit's ⌃⌘-drag gesture never fires on its own;
+    /// intercept it before the terminal view swallows the click as a ctrl-click.
+    override func sendEvent(_ event: NSEvent) {
+        if Self.isDragOnGestureMouseDown(event),
+           UserDefaults.standard.bool(forKey: "NSWindowShouldDragOnGesture"),
+           !isWindowDragSuppressed(window: self) {
+            _ = withTemporaryWindowMovableEnabled(window: self) {
+                performDrag(with: event)
+            }
+            return
+        }
+        super.sendEvent(event)
+    }
+
+    static func isDragOnGestureMouseDown(_ event: NSEvent) -> Bool {
+        guard event.type == .leftMouseDown else { return false }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        return flags.contains(.control) && flags.contains(.command)
+    }
+
     override func keyDown(with event: NSEvent) {
         guard !isSoftHiddenForVisibilityController else { return }
         super.keyDown(with: event)
