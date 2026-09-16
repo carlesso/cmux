@@ -35942,7 +35942,11 @@ export default CMUXSessionRestore;
                     defaultValue: "Task completed"
                 )
             let antigravityHasActiveBackgroundWork = hasActiveAntigravityBackgroundWork()
-            var hasActiveBackgroundWork = antigravityHasActiveBackgroundWork || codexHasActiveBackgroundWork
+            let grokHasActiveBackgroundWork = def.name == "grok"
+                && AgentHookNotificationClassifier.hasActiveGrokBackgroundWork(input.rawObject)
+            var hasActiveBackgroundWork = antigravityHasActiveBackgroundWork
+                || codexHasActiveBackgroundWork
+                || grokHasActiveBackgroundWork
             let stopNotificationStatus: AgentHookNotificationStatus = (codexFailure == nil && antigravityFailure == nil) ? .idle : .error
             var lifecycleAfterStop: AgentHibernationLifecycleState = {
                 if hasActiveBackgroundWork && stopNotificationStatus == .idle {
@@ -36058,7 +36062,9 @@ export default CMUXSessionRestore;
             // the store, journal, and visible badge cannot disagree.
             if def.name == "codex" {
                 codexHasActiveBackgroundWork = (codexStopDecision?.activeChildCount ?? 0) > 0
-                hasActiveBackgroundWork = antigravityHasActiveBackgroundWork || codexHasActiveBackgroundWork
+                hasActiveBackgroundWork = antigravityHasActiveBackgroundWork
+                    || codexHasActiveBackgroundWork
+                    || grokHasActiveBackgroundWork
                 lifecycleAfterStop = hasActiveBackgroundWork && stopNotificationStatus == .idle
                     ? .running
                     : (stopNotificationStatus == .idle ? .idle : .needsInput)
@@ -36126,19 +36132,25 @@ export default CMUXSessionRestore;
             )
 
             if !sessionId.isEmpty, !suppressVisibleMutations {
+                // An intermediate stop must not leave "Completed" as the stored
+                // summary: a later message-less notification would rebuild it.
+                let intermediateStop = (def.name == "codex" && codexHasActiveBackgroundWork)
+                    || (def.name == "grok" && grokHasActiveBackgroundWork)
                 _ = try? store.upsert(sessionId: sessionId, workspaceId: workspaceId, surfaceId: surfaceId, cwd: cwd,
                     transcriptPath: input.transcriptPath ?? mapped?.transcriptPath,
                     pid: pid,
                     launchCommand: resumeLaunchCommand,
                     agentLifecycle: lifecycleAfterStop,
                     hookEventName: persistedHookEventName,
-                    lastSubtitle: (def.name == "codex" && codexHasActiveBackgroundWork) ? nil : subtitle,
-                                  lastBody: (def.name == "codex" && codexHasActiveBackgroundWork) ? nil : body,
-                                  lastNotificationStatus: (def.name == "codex" && codexHasActiveBackgroundWork) ? nil : stopNotificationStatus,
+                    lastSubtitle: intermediateStop ? nil : subtitle,
+                                  lastBody: intermediateStop ? nil : body,
+                                  lastNotificationStatus: intermediateStop ? nil : stopNotificationStatus,
                                   updateLastNotificationStatus: true,
                                   runtimeStatus: (hasActiveBackgroundWork && stopNotificationStatus == .idle) ? .running : runtimeStatus(for: stopNotificationStatus),
-                                  updateRuntimeStatus: true)
-                if def.name == "codex", codexHasActiveBackgroundWork {
+                                  updateRuntimeStatus: true,
+                                  // grok's idle_prompt carries no task list; it reads this flag.
+                                  hadPendingBackgroundWorkAtStop: def.name == "grok" ? grokHasActiveBackgroundWork : nil)
+                if intermediateStop {
                     try? store.clearNotificationSummary(sessionId: sessionId)
                 }
                 publishAgentSurfaceResumeBinding(
@@ -36188,6 +36200,7 @@ export default CMUXSessionRestore;
             let hasGrokTranscriptContext = def.name == "grok" && normalizedHookValue(cwd) != nil
             let shouldPublishGrokStopFallbackNotification = def.name == "grok"
                 && stopNotificationStatus == .idle
+                && !grokHasActiveBackgroundWork
                 && (grokAssistantMessage != nil || !hasGrokTranscriptContext)
             let shouldPublishStopAlert = (shouldPublishStopNotification || shouldPublishGrokStopFallbackNotification)
                 && !suppressCompletionNotification
@@ -36514,6 +36527,29 @@ export default CMUXSessionRestore;
                     return
                 }
             }
+            let grokNotificationType = def.name == "grok"
+                ? AgentHookNotificationClassifier.grokNotificationType(input.rawObject)
+                : nil
+            // A finished background task wakes grok for a synthetic turn
+            // (UserPromptSubmit follows immediately); its message reads as a
+            // completion cue but nothing is complete for the user yet.
+            if grokNotificationType == "task_complete" {
+                emitJournal(
+                    .stateChanged,
+                    workspaceId: workspaceId,
+                    surfaceId: surfaceId,
+                    pendingWork: true,
+                    detail: "grok-task-complete"
+                )
+                sendAgentFeedTelemetryUnlessSuppressed(workspaceId: workspaceId, surfaceId: surfaceId)
+                print("{}")
+                return
+            }
+            // idle_prompt carries no task list; the last Stop cached whether
+            // background work was still running.
+            let grokHasPendingBackgroundWork = def.name == "grok"
+                && grokNotificationType == "idle_prompt"
+                && mapped?.hadPendingBackgroundWorkAtStop == true
 
             var cursorApprovalNotificationCorrelationKey: String?
             if cursorShellNeedsApproval {
@@ -36605,8 +36641,10 @@ export default CMUXSessionRestore;
             // "needs input" state (same invariant as the Claude pending idle_prompt):
             // the banner is gated app-side (p=1) and the pane must stay Running
             // rather than flipping to "needs input".
+            let notificationHasPendingBackgroundWork = hasActiveAntigravityBackgroundWork()
+                || grokHasPendingBackgroundWork
             let suppressPendingWaitingState = summary.notifyCategory == .idleReminder
-                && hasActiveAntigravityBackgroundWork()
+                && notificationHasPendingBackgroundWork
 
 #if DEBUG
             agentHookDebugLog(
@@ -36655,7 +36693,7 @@ export default CMUXSessionRestore;
             // turn boundary — the same invariant the stop lane enforces. Skip the
             // send AND the dedupe fingerprint: sending a gated payload here would
             // mark the idle fingerprint and swallow the real fullyIdle completion.
-            if summary.notifyCategory == .turnComplete, hasActiveAntigravityBackgroundWork() {
+            if summary.notifyCategory == .turnComplete, notificationHasPendingBackgroundWork {
 #if DEBUG
                 agentHookDebugLog(
                     "agentHook.notification.skip agent=\(def.name) session=\(agentHookDebugShort(sessionId)) reason=backgroundWorkPendingTurnComplete",
@@ -36778,7 +36816,7 @@ export default CMUXSessionRestore;
                 workspaceId: workspaceId,
                 surfaceId: surfaceId,
                 pendingWork: (summary.notifyCategory == .turnComplete || summary.notifyCategory == .idleReminder)
-                    && hasActiveAntigravityBackgroundWork(),
+                    && notificationHasPendingBackgroundWork,
                 detail: notificationJournalKind == .errorReported ? summary.body : nil,
                 responseTimeout: cursorShellNeedsApproval ? cursorCriticalTimeout() : nil
             )
@@ -36817,7 +36855,7 @@ export default CMUXSessionRestore;
                     category: summary.notifyCategory,
                     isError: summary.status == .error,
                     pending: (summary.notifyCategory == .turnComplete || summary.notifyCategory == .idleReminder)
-                        && hasActiveAntigravityBackgroundWork(),
+                        && notificationHasPendingBackgroundWork,
                     agentID: def.name,
                     isSubagent: isNestedAgentSession,
                     correlationKey: cursorShellNeedsApproval

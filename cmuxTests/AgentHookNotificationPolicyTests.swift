@@ -43,6 +43,54 @@ struct AgentHookNotificationPolicyTests {
         #expect(emptyFallback.isFallback == true)
     }
 
+    /// grok serializes the Stop payload in camelCase; a running shell/monitor/
+    /// subagent task or an armed session cron makes the stop intermediate.
+    @Test func grokStopBackgroundWorkTable() {
+        let running: [String: Any] = [
+            "reason": "end_turn",
+            "backgroundTasks": [["id": "t1", "type": "shell", "status": "running", "command": "sleep 70"]],
+            "sessionCrons": [],
+        ]
+        #expect(AgentHookNotificationClassifier.hasActiveGrokBackgroundWork(running))
+
+        let finished: [String: Any] = [
+            "reason": "end_turn",
+            "backgroundTasks": [["id": "t1", "type": "shell", "status": "completed"]],
+            "sessionCrons": [],
+        ]
+        #expect(!AgentHookNotificationClassifier.hasActiveGrokBackgroundWork(finished))
+
+        let cronOnly: [String: Any] = [
+            "backgroundTasks": [],
+            "sessionCrons": [["id": "c1", "schedule": "every 1d"]],
+        ]
+        #expect(AgentHookNotificationClassifier.hasActiveGrokBackgroundWork(cronOnly))
+
+        let snakeCase: [String: Any] = [
+            "background_tasks": [["status": "running"]],
+        ]
+        #expect(AgentHookNotificationClassifier.hasActiveGrokBackgroundWork(snakeCase))
+
+        // Session-end stops and older clients omit both keys.
+        #expect(!AgentHookNotificationClassifier.hasActiveGrokBackgroundWork(["reason": "session_end"]))
+        #expect(!AgentHookNotificationClassifier.hasActiveGrokBackgroundWork(nil))
+    }
+
+    @Test func grokNotificationTypeTable() {
+        #expect(AgentHookNotificationClassifier.grokNotificationType(
+            ["notificationType": "idle_prompt", "message": "Waiting for your next prompt"]
+        ) == "idle_prompt")
+        #expect(AgentHookNotificationClassifier.grokNotificationType(
+            ["notificationType": "task_complete", "message": "Background task completed: t1"]
+        ) == "task_complete")
+        #expect(AgentHookNotificationClassifier.grokNotificationType(
+            ["notification_type": " permission_prompt "]
+        ) == "permission_prompt")
+        #expect(AgentHookNotificationClassifier.grokNotificationType(["notificationType": ""]) == nil)
+        #expect(AgentHookNotificationClassifier.grokNotificationType(["message": "x"]) == nil)
+        #expect(AgentHookNotificationClassifier.grokNotificationType(nil) == nil)
+    }
+
     @Test func dedupeFingerprintTable() {
         let first = fingerprint(status: .needsInput, body: "waiting for input")
         let same = fingerprint(status: .needsInput, body: "waiting for input")

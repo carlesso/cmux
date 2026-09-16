@@ -214,6 +214,34 @@ enum AgentHookNotificationClassifier {
         ) != nil
     }
 
+    /// Grok's `Stop` payload lists the turn's still-running background shell,
+    /// monitor and subagent tasks (`backgroundTasks`, camelCase) and armed
+    /// session crons (`sessionCrons`); a turn ending with either is an
+    /// intermediate boundary, not a completion. Snake-case spellings are
+    /// accepted for symmetry with the Claude payload.
+    static func hasActiveGrokBackgroundWork(_ rawObject: [String: Any]?) -> Bool {
+        guard let rawObject else { return false }
+        if let crons = (rawObject["sessionCrons"] ?? rawObject["session_crons"]) as? [Any],
+           !crons.isEmpty {
+            return true
+        }
+        if let tasks = (rawObject["backgroundTasks"] ?? rawObject["background_tasks"]) as? [[String: Any]] {
+            return tasks.contains { ($0["status"] as? String) == "running" }
+        }
+        return false
+    }
+
+    /// `notificationType` of a grok `Notification` payload: `permission_prompt`,
+    /// `elicitation_dialog`, `idle_prompt`, `task_complete`, `agent_error`.
+    static func grokNotificationType(_ rawObject: [String: Any]?) -> String? {
+        guard let rawObject,
+              let value = (rawObject["notificationType"] ?? rawObject["notification_type"]) as? String else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     static func containsCompletionCue(_ lowercasedText: String) -> Bool {
         notificationCueTokens(lowercasedText).contains { token in
             token == "done"
